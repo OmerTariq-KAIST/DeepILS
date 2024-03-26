@@ -3,79 +3,111 @@ This is the 1-D  version of MobileNet
 Original paper is "MobileNets: Efficient Convolutional Neural Networks for Mobile Vision Applications"
 Link: https://arxiv.org/abs/1704.04861
 
-The implementation in https://towardsdatascience.com/building-mobilenet-from-scratch-using-tensorflow-ad009c5dd42c
+The implementation in https://hackmd.io/@machine-learning/rk-MSuYFU has been modified.
 
 """
 
-import tensorflow as tf
-from tensorflow.python.framework.convert_to_constants import convert_variables_to_constants_v2_as_graph
+import torch.nn as nn
+import torch
+from collections import OrderedDict
+from torch.autograd import Variable
 
-#import all necessary layers
-from keras.layers import Input
-from keras.layers import Conv1D, BatchNormalization, DepthwiseConv1D
-from keras.layers import ReLU, GlobalAveragePooling1D, Flatten, Dense
-from keras import Model
 
-# MobileNet block
-def mb_block (x, filters, strides):
-    
-    x = DepthwiseConv1D(kernel_size = 3, strides = strides, padding = 'same')(x)
-    x = BatchNormalization()(x)
-    x = ReLU()(x)
-    
-    x = Conv1D(filters = filters, kernel_size = 1, strides = 1)(x)
-    x = BatchNormalization()(x)
-    x = ReLU()(x)
-    
-    return x
-def MobileNet (input_shape , class_number):
-    input = Input(shape = input_shape)
-    x = Conv1D(filters = 32, kernel_size = 3, strides = 2, padding = 'same')(input)
-    x = BatchNormalization()(x)
-    x = ReLU()(x)
-    
-    
-    # main part of the model
-    x = mb_block(x, filters = 64, strides = 1)
-    x = mb_block(x, filters = 128, strides = 2)
-    x = mb_block(x, filters = 128, strides = 1)
-    x = mb_block(x, filters = 256, strides = 2)
-    x = mb_block(x, filters = 256, strides = 1)
-    x = mb_block(x, filters = 512, strides = 2)
-    for _ in range (5):
-         x = mb_block(x, filters = 512, strides = 1)
-         
-    x = mb_block(x, filters = 1024, strides = 2)
-    x = mb_block(x, filters = 1024, strides = 1)
-    x = GlobalAveragePooling1D ()(x)
-    x = Flatten()(x)
-    output = Dense (units = class_number)(x)
-    model = Model(inputs=input, outputs=output)
-    model.summary()
-    
-    return model
-    # #plot the model
-    # tf.keras.utils.plot_model(model, to_file='model.png', show_shapes=True
-    #                           , show_dtype=False,show_layer_names=True, rankdir='TB', expand_nested=False, dpi=96)
+class DSConv(nn.Module):
 
-def get_flops(model, batch_size=None):
-    if batch_size is None:
-        batch_size = 1
+    def __init__(self, f_3x3, f_1x1, stride=1, padding=0):
+        super(DSConv, self).__init__()
 
-    real_model = tf.function(model).get_concrete_function(tf.TensorSpec([batch_size] + model.inputs[0].shape[1:], model.inputs[0].dtype))
-    frozen_func, graph_def = convert_variables_to_constants_v2_as_graph(real_model)
+        self.feature = nn.Sequential(OrderedDict([
+            ('dconv', nn.Conv1d(f_3x3,
+                                f_3x3,
+                                kernel_size=3,
+                                groups=f_3x3,
+                                stride=stride,
+                                padding=padding,
+                                bias=False
+                                )),
+            ('bn1', nn.BatchNorm1d(f_3x3)),
+            ('act1', nn.ReLU()),
+            ('pconv', nn.Conv1d(f_3x3,
+                                f_1x1,
+                                kernel_size=1,
+                                bias=False)),
+            ('bn2', nn.BatchNorm1d(f_1x1)),
+            ('act2', nn.ReLU())
+        ]))
 
-    run_meta = tf.compat.v1.RunMetadata()
-    opts = tf.compat.v1.profiler.ProfileOptionBuilder.float_operation()
-    flops = tf.compat.v1.profiler.profile(graph=frozen_func.graph,
-                                            run_meta=run_meta, cmd='op', options=opts)
-    return flops.total_float_ops
+    def forward(self, x):
+        out = self.feature(x)
+        return out
+
+
+class MobileNet(nn.Module):
+    """
+        MobileNet-V1 architecture for CIFAR-10.
+    """
+
+    def __init__(self, channels, width_multiplier=1.0, num_classes=2):
+        super(MobileNet, self).__init__()
+
+        channels = [int(elt * width_multiplier) for elt in channels]
+
+        self.conv = nn.Sequential(OrderedDict([
+            ('conv', nn.Conv1d(6, channels[0], kernel_size=3,
+                               stride=2, padding=1, bias=False)),
+            ('bn', nn.BatchNorm1d(channels[0])),
+            ('act', nn.ReLU())
+        ]))
+
+        self.features = nn.Sequential(OrderedDict([
+            ('dsconv1', DSConv(channels[0], channels[1], 1, 1)),
+            ('dsconv2', DSConv(channels[1], channels[2], 2, 1)),
+            ('dsconv3', DSConv(channels[2], channels[2], 1, 1)),
+            ('dsconv4', DSConv(channels[2], channels[3], 2, 1)),
+            ('dsconv5', DSConv(channels[3], channels[3], 1, 1)),
+            ('dsconv6', DSConv(channels[3], channels[4], 2, 1)),
+            ('dsconv7_a', DSConv(channels[4], channels[4], 1, 1)),
+            ('dsconv7_b', DSConv(channels[4], channels[4], 1, 1)),
+            ('dsconv7_c', DSConv(channels[4], channels[4], 1, 1)),
+            ('dsconv7_d', DSConv(channels[4], channels[4], 1, 1)),
+            ('dsconv7_e', DSConv(channels[4], channels[4], 1, 1)),
+            ('dsconv8', DSConv(channels[4], channels[5], 2, 1)),
+            ('dsconv9', DSConv(channels[5], channels[5], 1, 1))
+        ]))
+
+        # self.output = nn.Sequential(OrderedDict([
+        #     ('conv_last', nn.Conv1d(1024,512,kernel_size=1,stride=1,bias=False)),
+        #     ('bn_last', nn.BatchNorm1d(512) ),
+        #     ('flaten', nn.Flatten() ),
+        #     ('first_linear' ,  nn.Linear(3584, 1024)),
+        #     ('act_1' , nn.ReLU(inplace= True)),
+        #     ('drop_1' , nn.Dropout(0.5)),
+        #     ('second_linear' ,  nn.Linear(1024, 128)),
+        #     ('act_2' , nn.ReLU(inplace= True)),
+        #     ('drop_2' , nn.Dropout(0.5)),
+        #     ('third_linear' ,  nn.Linear(128, 2))
+
+        # ]))
+
+        self.avgpool = nn.AdaptiveAvgPool1d((1))
+        self.linear = nn.Linear(channels[5], num_classes)
+
+    def forward(self, x):
+        out = self.conv(x)
+        out = self.features(out)
+        out = self.avgpool(out)
+        out = torch.flatten(out, 1)
+        out = self.linear(out)
+        # out = self.output(out)
+        return out
+
+    def get_num_params(self):
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
 if __name__ == '__main__':
-    input_shape =   (200, 6)
-    network  = MobileNet(input_shape , 2)
-    network.summary()
-    flops = get_flops(network, batch_size=1)
-    print(flops)
-    print(f"FLOPS: {flops / 10 ** 6:.03} M")
-
-
+    net = MobileNet(channels=[32, 64, 128, 256, 512, 1024], width_multiplier=1)
+    print(net)
+    x_image = Variable(torch.randn(1, 6, 200))
+    y = net(x_image)
+    print(y)

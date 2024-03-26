@@ -30,11 +30,11 @@ from torch.utils.data import DataLoader
 from sklearn import metrics
 from preprocess.data_processor import *
 from metric import compute_ate_rte, compute_absolute_trajectory_error
-from models.MobileNet import *
 from models.MobileNetV2 import *
-from models.EfficientnetB0 import *
+from models.MobileNet import *
 from models.MnasNet import *
 from models.IMUNet import *
+from models.EfficientnetB0 import *
 #from models.ResNet1D_dws import *
 from models.DeepILS import *
 from utils import *
@@ -93,6 +93,23 @@ def add_summary(writer, loss, step, mode):
     writer.add_scalar('{}_loss/avg'.format(mode), np.mean(loss), step)
 
 
+# Moving average function for test
+def simple_moving_average(data, window_size):
+    """
+    Calculate the simple moving average of a given data array using a specified window size.
+    
+    Args:
+        data: The input data array.
+        window_size: The size of the moving window.
+    
+    Returns:
+        The array of simple moving averages.
+    """
+    cumsum = np.cumsum(data)
+    cumsum[window_size:] = cumsum[window_size:] - cumsum[:-window_size]
+    return cumsum[window_size - 1:] / window_size
+
+
 def get_dataset(root_dir, data_list, args, **kwargs):
     mode = kwargs.get('mode', 'train')
 
@@ -146,155 +163,116 @@ def get_dataset_from_list(root_dir, list_path, args, mode, **kwargs):
 
 
 def train(args, **kwargs):
-    # Loading data
     start_t = time.time()
     print(args.root_dir)
     train_dataset = get_dataset_from_list(args.root_dir, args.train_list, args, mode='train')
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
 
     end_t = time.time()
-    print('Training set loaded. Feature size: {}, target size: {}. Time usage: {:.3f}s'.format(
-        train_dataset.feature_dim, train_dataset.target_dim, end_t - start_t))
-    val_dataset, val_loader = None, None
+    print(f'Training set loaded. Feature size: {train_dataset.feature_dim}, target size: {train_dataset.target_dim}. Time usage: {end_t - start_t:.3f}s')
+    
     if args.val_list is not None:
         val_dataset = get_dataset_from_list(args.root_dir, args.val_list, args, mode='val')
-        val_loader = DataLoader(val_dataset, batch_size=512, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=512, shuffle=False)  # Changed shuffle to False for validation
 
     device = torch.device('cuda:0' if torch.cuda.is_available() and not args.cpu else 'cpu')
 
-    summary_writer = None
     if args.out_dir is not None:
-        if not osp.isdir(args.out_dir):
-            os.makedirs(args.out_dir)
-        write_config(args)
-        if not osp.isdir(osp.join(args.out_dir, 'checkpoints')):
-            os.makedirs(osp.join(args.out_dir, 'checkpoints'))
-        if not osp.isdir(osp.join(args.out_dir, 'logs')):
-            os.makedirs(osp.join(args.out_dir, 'logs'))
-
-    global _fc_config
-    _fc_config['in_dim'] = args.window_size // 32 + 1
+        os.makedirs(args.out_dir, exist_ok=True)
+        os.makedirs(osp.join(args.out_dir, 'checkpoints'), exist_ok=True)
+        os.makedirs(osp.join(args.out_dir, 'logs'), exist_ok=True)
 
     network = get_model(args).to(device)
     print(network)
-    print('Number of train samples: {}'.format(len(train_dataset)))
+    print(f'Number of train samples: {len(train_dataset)}')
     if val_dataset:
-        print('Number of val samples: {}'.format(len(val_dataset)))
-    total_params = network.get_num_params()
-    print('Total number of parameters: ', total_params)
-
-
+        print(f'Number of val samples: {len(val_dataset)}')
+    
     criterion = torch.nn.MSELoss()
     optimizer = torch.optim.Adam(network.parameters(), args.lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.1, patience=10, verbose=True, eps=1e-12)
-    # torch.autograd.set_detect_anomaly(True)
+
     start_epoch = 0
     if args.continue_from is not None and osp.exists(args.continue_from):
         checkpoints = torch.load(args.continue_from)
         start_epoch = checkpoints.get('epoch', 0)
-        network.load_state_dict(checkpoints.get('model_state_dict'))
-        optimizer.load_state_dict(checkpoints.get('optimizer_state_dict'))
+        network.load_state_dict(checkpoints['model_state_dict'])
+        optimizer.load_state_dict(checkpoints['optimizer_state_dict'])
 
-    if args.out_dir is not None and osp.exists(osp.join(args.out_dir, 'logs')):
-        summary_writer = SummaryWriter(osp.join(args.out_dir, 'logs'))
-        # summary_writer.add_text('info', 'total_param: {}'.format(total_params))
+    summary_writer = SummaryWriter(osp.join(args.out_dir, 'logs')) if args.out_dir else None
 
     step = 0
-    best_val_loss = np.inf
+    best_val_metric = np.inf
+    train_losses_all, val_losses_all, diff_losses_all = [], [], []
 
-    print('Start from epoch {}'.format(start_epoch))
-    total_epoch = start_epoch
-    train_losses_all, val_losses_all = [], []
+    best_avg_diff_loss = np.inf  # Track the best differential loss for validation
 
-    # Get the initial loss.
-    init_train_targ, init_train_pred = run_test(network, train_loader, device, eval_mode=False)
+    for epoch in range(start_epoch, args.epochs):
+        start_t = time.time()
+        network.train()
+        train_outs, train_targets = [], []
+        for batch_id, (feat, targ, _, _) in enumerate(train_loader):
+            feat, targ = feat.to(device), targ.to(device)
+            optimizer.zero_grad()
+            pred = network(feat)
+            
+            loss = criterion(pred, targ)
+            diff = torch.abs(pred - targ)  # Absolute differences for differential loss
+            mean_diff = torch.mean(diff)  # Mean of absolute differences
 
-    init_train_loss = np.mean((init_train_targ - init_train_pred) ** 2, axis=0)
-    train_losses_all.append(np.mean(init_train_loss))
-    print('-------------------------')
-    print('Init: average loss: {}/{:.6f}'.format(init_train_loss, train_losses_all[-1]))
-    if summary_writer is not None:
-        add_summary(summary_writer, init_train_loss, 0, 'train')
+            # Combining MSE and differential loss for backpropagation
+            total_loss = loss + mean_diff  # Could introduce a weighting factor here
+            
+            total_loss.backward()
+            optimizer.step()
+            
+            train_outs.append(pred.cpu().detach().numpy())
+            train_targets.append(targ.cpu().detach().numpy())
+            step += 1
 
-    if val_loader is not None:
-        init_val_targ, init_val_pred = run_test(network, val_loader, device)
-        init_val_loss = np.mean((init_val_targ - init_val_pred) ** 2, axis=0)
-        val_losses_all.append(np.mean(init_val_loss))
-        print('Validation loss: {}/{:.6f}'.format(init_val_loss, val_losses_all[-1]))
-        if summary_writer is not None:
-            add_summary(summary_writer, init_val_loss, 0, 'val')
+        train_outs = np.concatenate(train_outs, axis=0)
+        train_targets = np.concatenate(train_targets, axis=0)
+        train_losses = np.mean((train_outs - train_targets) ** 2, axis=0)
+        mean_diff_losses = np.mean(np.abs(train_outs - train_targets), axis=0)
+        train_losses_all.append(np.mean(train_losses))
+        diff_losses_all.append(np.mean(mean_diff_losses))
 
-    # Measure training time
-    start_time = time.time()
+        # Printing losses for the current epoch
+        print(f'Epoch {epoch}, Train Loss: {np.mean(train_losses):.6f}, Differential Loss: {np.mean(mean_diff_losses):.6f}')
 
-    try:
-        for epoch in range(start_epoch, args.epochs):
-            start_t = time.time()
-            network.train()
-            train_outs, train_targets = [], []
-            for batch_id, (feat, targ, _, _) in enumerate(train_loader):
-                feat, targ = feat.to(device), targ.to(device)
-                optimizer.zero_grad()
-                pred = network(feat)
-                train_outs.append(pred.cpu().detach().numpy())
-                train_targets.append(targ.cpu().detach().numpy())
-                loss = criterion(pred, targ)
-                loss = torch.mean(loss)
-                loss.backward()
-                optimizer.step()
-                step += 1
-            train_outs = np.concatenate(train_outs, axis=0)
-            train_targets = np.concatenate(train_targets, axis=0)
-            train_losses = np.average((train_outs - train_targets) ** 2, axis=0)
+        if summary_writer:
+            summary_writer.add_scalar('Loss/train', np.mean(train_losses), epoch)
+            summary_writer.add_scalar('Diff/train', np.mean(mean_diff_losses), epoch)
+        
+        # Validation phase
+        if val_loader:
+            network.eval()
+            val_outs, val_targets = run_test(network, val_loader, device)
+            val_losses = np.mean((val_outs - val_targets) ** 2, axis=0)
+            diff_losses = np.mean(np.abs(val_outs - val_targets), axis=0)
+            val_losses_all.append(np.mean(val_losses))
+            diff_losses_all.append(np.mean(diff_losses))
+            avg_diff_loss = np.mean(diff_losses)
 
-            end_t = time.time()
-            print('-------------------------')
-            print('Epoch {}, time usage: {:.3f}s, average loss: {}/{:.6f}'.format(
-                epoch, end_t - start_t, train_losses, np.average(train_losses)))
-            train_losses_all.append(np.average(train_losses))
+            # Printing validation losses for the current epoch
+            print(f'Epoch {epoch}, Validation Loss: {np.mean(val_losses):.6f}, Differential Loss: {np.mean(diff_losses):.6f}')
+            
+            
+            if avg_diff_loss < best_avg_diff_loss:
+                best_avg_diff_loss = avg_diff_loss
+                model_path = osp.join(args.out_dir, 'checkpoints', 'checkpoint_best.pt')
+                torch.save({'model_state_dict': network.state_dict(), 'epoch': epoch, 'optimizer_state_dict': optimizer.state_dict()}, model_path)
+                print(f'New best model saved based on differential loss to {model_path}')
+        
+        scheduler.step(np.mean(val_losses))  # Adjust LR based on validation MSE loss
 
-            if summary_writer is not None:
-                add_summary(summary_writer, train_losses, epoch + 1, 'train')
-                summary_writer.add_scalar('optimizer/lr', optimizer.param_groups[0]['lr'], epoch)
-
-            if val_loader is not None:
-                network.eval()
-                val_outs, val_targets = run_test(network, val_loader, device)
-                val_losses = np.average((val_outs - val_targets) ** 2, axis=0)
-                avg_loss = np.average(val_losses)
-                print('Validation loss: {}/{:.6f}'.format(val_losses, avg_loss))
-                scheduler.step(avg_loss)
-                if summary_writer is not None:
-                    add_summary(summary_writer, val_losses, epoch + 1, 'val')
-                val_losses_all.append(avg_loss)
-                if avg_loss < best_val_loss:
-                    best_val_loss = avg_loss
-                    if args.out_dir and osp.isdir(args.out_dir):
-                        model_path = osp.join(args.out_dir, 'checkpoints', 'checkpoint_best.pt')
-                        torch.save({'model_state_dict': network.state_dict(),
-                                    'epoch': epoch,
-                                    'optimizer_state_dict': optimizer.state_dict()}, model_path)
-                        print('Model saved to ', model_path)
-
-            total_epoch = epoch
-
-        end_time = time.time()
-        total_train_time = end_time - start_time
-        print(f"Total training time for the train sequence: {total_train_time} seconds")
-
-    except KeyboardInterrupt:
-        print('-' * 60)
-        print('Early terminate')
-
+    # Final saving of model, metrics, etc.
     print('Training complete')
-    if args.out_dir:
-        model_path = osp.join(args.out_dir, 'checkpoints', 'checkpoint_latest.pt')
-        torch.save({'model_state_dict': network.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'epoch': total_epoch}, model_path)
-        print('Checkpoint saved to ', model_path)
+    final_model_path = osp.join(args.out_dir, 'checkpoints', 'checkpoint_latest.pt')
+    torch.save({'model_state_dict': network.state_dict(), 'epoch': epoch, 'optimizer_state_dict': optimizer.state_dict()}, final_model_path)
+    print(f'Checkpoint saved to {final_model_path}')
 
-    return train_losses_all, val_losses_all
+    return train_losses_all, val_losses_all, diff_losses_all
 
 
 def recon_traj_with_preds(dataset, preds, seq_id=0, **kwargs):
