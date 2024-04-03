@@ -16,6 +16,8 @@ DeepILS with other ResNet18-based model architectures are presented for comparat
 5. RoNIN dataset can be downloaded from [RoNIN](https://ronin.cs.sfu.ca/#dataset)
 6. RIDI dataset can be downloaded from [RIDI](https://www.kaggle.com/code/kmader/ridi-data-overview/data)
 
+# Results
+The inertial trajectories and checkpoints for each dataset are available in the folder /results
 
 # Android
 The DeepILS Mobile application is available at [DeepILS-Mobile](). 
@@ -23,14 +25,7 @@ The DeepILS Mobile application is available at [DeepILS-Mobile]().
 
 # Requirements
 
-- Python 3.10
-- matplotlib == 3.1.1
-- numpy == 1.19.4
-- pandas == 0.25.1
-- scikit_learn == 0.21.3
-- torch == 1.8.0
-
 Dependencies can be installed using the following command:
 ```bash
-pip install -r requirements.txt
+conda env create -f DeepILS.yml
 ```
