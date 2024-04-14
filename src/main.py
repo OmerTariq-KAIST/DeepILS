@@ -13,12 +13,12 @@ import torch
 import json
 import math
 import matplotlib.pyplot as plt
-from thop import profile
-from thop import clever_format
+#from thop import profile
+#from thop import clever_format
 
 # importing ONNX
-import onnx
-import onnxruntime as nxrun
+#import onnx
+#import onnxruntime as nxrun
 
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
@@ -160,7 +160,15 @@ def get_dataset_from_list(root_dir, list_path, args, mode, **kwargs):
     return get_dataset(root_dir, data_list, args, **kwargs)
 
 
+# Train function with differential loss as validation
 def train(args, **kwargs):
+    import os
+    import os.path as osp
+    import numpy as np
+    import torch
+    from torch.utils.data import DataLoader
+    from torch.utils.tensorboard import SummaryWriter
+
     start_t = time.time()
     print(args.root_dir)
     train_dataset = get_dataset_from_list(args.root_dir, args.train_list, args, mode='train')
@@ -169,6 +177,7 @@ def train(args, **kwargs):
     end_t = time.time()
     print(f'Training set loaded. Feature size: {train_dataset.feature_dim}, target size: {train_dataset.target_dim}. Time usage: {end_t - start_t:.3f}s')
     
+    val_dataset = None
     if args.val_list is not None:
         val_dataset = get_dataset_from_list(args.root_dir, args.val_list, args, mode='val')
         val_loader = DataLoader(val_dataset, batch_size=512, shuffle=False)  # Changed shuffle to False for validation
@@ -245,24 +254,35 @@ def train(args, **kwargs):
         # Validation phase
         if val_loader:
             network.eval()
-            val_outs, val_targets = run_test(network, val_loader, device)
+            val_outs, val_targets = [], []
+            for _, batch in enumerate(val_loader):
+                if len(batch) == 2:
+                    feat, targ = batch
+                elif len(batch) > 2:
+                    feat, targ = batch[0], batch[1]  # assuming the first two are features and targets
+                else:
+                    continue  # skip batches that do not match expected format
+                
+                feat, targ = feat.to(device), targ.to(device)
+                pred = network(feat)
+                val_outs.append(pred.cpu().detach().numpy())
+                val_targets.append(targ.cpu().detach().numpy())
+
+            val_outs = np.concatenate(val_outs, axis=0)
+            val_targets = np.concatenate(val_targets, axis=0)
             val_losses = np.mean((val_outs - val_targets) ** 2, axis=0)
             diff_losses = np.mean(np.abs(val_outs - val_targets), axis=0)
             val_losses_all.append(np.mean(val_losses))
             diff_losses_all.append(np.mean(diff_losses))
-            avg_diff_loss = np.mean(diff_losses)
-
-            # Printing validation losses for the current epoch
             print(f'Epoch {epoch}, Validation Loss: {np.mean(val_losses):.6f}, Differential Loss: {np.mean(diff_losses):.6f}')
             
-            
-            if avg_diff_loss < best_avg_diff_loss:
-                best_avg_diff_loss = avg_diff_loss
+            scheduler.step(np.mean(val_losses))  # Adjust LR based on validation MSE loss
+
+            if np.mean(diff_losses) < best_avg_diff_loss:
+                best_avg_diff_loss = np.mean(diff_losses)
                 model_path = osp.join(args.out_dir, 'checkpoints', 'checkpoint_best.pt')
                 torch.save({'model_state_dict': network.state_dict(), 'epoch': epoch, 'optimizer_state_dict': optimizer.state_dict()}, model_path)
                 print(f'New best model saved based on differential loss to {model_path}')
-        
-        scheduler.step(np.mean(val_losses))  # Adjust LR based on validation MSE loss
 
     # Final saving of model, metrics, etc.
     print('Training complete')
