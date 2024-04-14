@@ -27,6 +27,14 @@ import pandas
 import numpy as np
 import quaternion
 
+class RandomSmooth:
+    def __init__(self, max_sigma):
+        self.max_sigma = max_sigma
+
+    def __call__(self, feat, targ, **kwargs):
+        sigma = np.random.random() * self.max_sigma
+        return gaussian_filter1d(feat, sigma=sigma, axis=0), targ
+
 class RandomHoriRotate:
     def __init__(self, max_angle):
         self.max_angle = max_angle
