@@ -1,8 +1,7 @@
 ## DeepILS: Towards Accurate Domain Invariant AIoT-enabled Inertial Localization System
 
-This is the Pytorch implementation
-
-A novel Neural Network called DeepILS is proposed for AIoT enabled Inertial Positioning to use IMU data and performs pedestrian inertial navigation. 
+This is the Pytorch implementation of DeepILS Model. 
+DeepILS is a lightweight model that uses only IMU data and performs pedestrian inertial navigation on the edge. 
 
 
 # Architectures
@@ -17,7 +16,7 @@ DeepILS with other ResNet18-based model architectures are presented for comparat
 6. RIDI dataset can be downloaded from [RIDI](https://www.kaggle.com/code/kmader/ridi-data-overview/data)
 
 # Results
-The inertial trajectories and checkpoints for each dataset are available in the folder /results
+The inertial trajectories and checkpoints for 6 datasets evaluated on DeepILS are available in the folder /results
 
 # Android
 The DeepILS Mobile application is available at [DeepILS-Mobile](). 
