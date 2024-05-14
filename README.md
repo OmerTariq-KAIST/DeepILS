@@ -19,7 +19,7 @@ DeepILS with other ResNet18-based model architectures are presented for comparat
 The inertial trajectories and checkpoints for 6 datasets evaluated on DeepILS are available in the folder /results
 
 # Android
-The DeepILS Mobile application is available at [DeepILS-Mobile](). 
+The DeepILS Mobile application is available at [DeepILS-Mobile](https://drive.google.com/file/d/15T4dHczYPHEoxazvyNO9vQIJLl1GPZLZ/view?usp=sharing). 
 
 
 # Requirements
