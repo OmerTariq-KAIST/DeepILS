@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 #from thop import clever_format
 
 # importing ONNX
-#import onnx
+import onnx
 #import onnxruntime as nxrun
 
 import matplotlib.pyplot as plt
